@@ -34,10 +34,54 @@ with st.container():
     with c1:
         dzo_name = st.text_input("**Название ДЗО**", placeholder="Введите название...")
     with c2:
-        # Эта дата влияет на правило "Проверки информации" и старт цепочки
-        begin_date = st.date_input("**Дата начала контроля ИБ**", value=date.today())
+        # Эта дата влияет на общий план и старт ряда активностей
+        info_date = st.date_input("**Дата начала контроля ИБ**", value=date.today())
     with c3:
-        info_date = st.date_input("**Дата последнего предоставления информации от ДЗО**", value=date.today())
+        overall_end = st.session_state.get("overall_end_date")
+
+        if overall_end:
+            # Есть итоговая дата – окрашенный блок
+            st.markdown(
+                f"""
+                <div style="
+                    display:flex;
+                    align-items:center;
+                    margin-top:28px;
+                    justify-content:center;
+                    height: 40px;
+                    border-radius: 8px;
+                    background-color:#fff7e6;
+                    border:1px solid #fa8c16;
+                    font-size:14px;
+                    font-weight:600;
+                    color:#d46b08;
+                ">
+                    Планируемая дата завершения: {overall_end.strftime('%d.%m.%Y')}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            # Даты нет — серая заглушка
+            st.markdown(
+                f"""
+                <div style="
+                    display:flex;
+                    align-items:center;
+                    margin-top:28px;
+                    justify-content:center;
+                    height: 40px;
+                    border-radius: 8px;
+                    background-color:#f5f5f5;
+                    border:1px dashed #bfbfbf;
+                    font-size:14px;
+                    color:#8c8c8c;
+                ">
+                    Итоговая дата не рассчитана
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
     with st.container():
@@ -47,6 +91,9 @@ with st.container():
         with c2:
             objects = st.text_area("**Объекты контроля ИБ**", height=80)
     st.markdown("</div>", unsafe_allow_html=True)
+
+# Визуальный разделитель между блоками
+st.markdown("<br>", unsafe_allow_html=True)
 
 # --- 2. СОСТАВ ГРУППЫ ---
 st.markdown('<div class="header-box">Состав группы контроля ИБ</div>', unsafe_allow_html=True)
@@ -58,6 +105,9 @@ with st.container():
     with col_g2:
         group_dzo = st.text_area("**ФИО, должности (ДЗО)**", height=120)
     st.markdown("</div>", unsafe_allow_html=True)
+
+# Ещё один визуальный разделитель
+st.markdown("<br>", unsafe_allow_html=True)
 
 # --- БАЗА ДАННЫХ КОНТРОЛЕЙ ---
 CONTROLS_DB = {
@@ -71,11 +121,11 @@ CONTROLS_DB = {
     '"Здоровье AD"': {"cat": "Инструментальные проверки", "dur": 5},
     "Сканирование уязвимостей": {"cat": "Инструментальные проверки", "dur": 20},
     "Внутренний пентест": {"cat": "Инструментальные проверки", "dur": 20},
-    "Проверка информации в Блоке ИБ": {"cat": "Инструментальные проверки", "dur": 1},
-    "Подготовка и согласование Отчета": {"cat": "Инструментальные проверки", "dur": 1},
+    "Проверка информации в Блоке ИБ": {"cat": "Информация и отчет", "dur": 5},  # будет пересчитана
+    "Подготовка и согласование Отчета": {"cat": "Информация и отчет", "dur": 1},
 }
 
-# Порядок контролей для цепочки
+# Порядок контролей для экспорта и графика
 CONTROLS_ORDER = list(CONTROLS_DB.keys())
 
 
@@ -83,81 +133,53 @@ def key_base_from_name(name: str) -> str:
     return name.replace(" ", "_").replace('"', "")
 
 
-# --- ПЕРЕСЧЕТ ЦЕПОЧКИ С УЧЕТОМ ДЛИТЕЛЬНОСТЕЙ ---
-def recalc_chain():
+# --- РАБОТА С РАБОЧИМИ ДНЯМИ ---
+
+def end_date_by_workdays(start: date, duration_workdays: int) -> date:
     """
-    Пересчитываем start/end для всех включенных контролей в цепочке.
-    - Первый включенный контроль: start берём из session_state или info_date (если ещё нет).
-    - Остальные: start = конец предыдущего + 1 день.
-    - Для "Проверка информации в Блоке ИБ": доп. ограничение +5 / +8 дней от info_date.
-    - end всегда = start + duration - 1.
-    Все значения записываются в session_state, чтобы UI и расчёт совпадали.
+    Возвращает дату окончания при заданном количестве рабочих дней (понедельник–пятница),
+    считая start включительно.
+    Выходные (сб/вс) пропускаются, но могут попадать в календарный интервал.
     """
-    current_cursor = info_date
-    first_enabled_seen = False
-
-    # Проверка наличия скана и пентеста для условия "Проверка информации"
-    scan_key = key_base_from_name("Сканирование уязвимостей")
-    pentest_key = key_base_from_name("Внутренний пентест")
-    has_scan = st.session_state.get(f"{scan_key}_check", False)
-    has_pentest = st.session_state.get(f"{pentest_key}_check", False)
-
-    for name in CONTROLS_ORDER:
-        props = CONTROLS_DB[name]
-        kb = key_base_from_name(name)
-
-        # инициализируем длительность, если нет
-        dur_key = f"{kb}_dur"
-        if dur_key not in st.session_state:
-            st.session_state[dur_key] = props["dur"]
-
-        enabled = st.session_state.get(f"{kb}_check", False)
-        if not enabled:
-            continue
-
-        duration = st.session_state.get(dur_key, props["dur"])
-
-        # старт
-        if not first_enabled_seen:
-            # первый включённый — даём возможность редактировать start вручную
-            start = st.session_state.get(f"{kb}_start", current_cursor)
-            first_enabled_seen = True
-        else:
-            # все последующие — строго по цепочке
-            start = current_cursor
-
-        # спец-логика для "Проверка информации..."
-        if name == "Проверка информации в Блоке ИБ":
-            lag_days = 8 if (has_scan and has_pentest) else 5
-            min_start_date = info_date + timedelta(days=lag_days)
-            start = max(start, min_start_date)
-
-        end = start + timedelta(days=duration - 1)
-
-        st.session_state[f"{kb}_start"] = start
-        st.session_state[f"{kb}_end"] = end
-
-        current_cursor = end + timedelta(days=1)
+    if duration_workdays <= 0:
+        return start
+    current = start
+    remaining = duration_workdays
+    while True:
+        if current.weekday() < 5:  # 0-4 = пн-пт
+            remaining -= 1
+            if remaining == 0:
+                return current
+        current += timedelta(days=1)
 
 
-# Пересчитываем цепочку ДО рендера таблицы, чтобы end всегда соответствовал duration
-recalc_chain()
-
-# --- 3. ВЫБОР КОНТРОЛЕЙ ---
-st.markdown('<div class="header-box">Планирование этапов (Контроли)</div>', unsafe_allow_html=True)
-st.markdown('<div class="form-row">', unsafe_allow_html=True)
-
-# Заголовки
-h1, h2, h3, h4, h5 = st.columns([3, 1, 2, 1.5, 2])
-h1.markdown("**Наименование контроля**")
-h2.markdown("**Включено**")
-h3.markdown("**Дата начала (план)**")
-h4.markdown("**Длит. (дн)**")
-h5.markdown("**Дата завершения (план)**")
-st.markdown("<hr style='margin: 5px 0 15px 0;'>", unsafe_allow_html=True)
+def next_workday(d: date) -> date:
+    """
+    Возвращает следующий рабочий день после даты d.
+    """
+    current = d + timedelta(days=1)
+    while current.weekday() >= 5:
+        current += timedelta(days=1)
+    return current
 
 
-def render_control_row(name):
+# --- ХЕЛПЕР ДЛЯ ЗАГОЛОВКА ТАБЛИЦЫ ---
+def render_table_header(with_order: bool = False):
+    if with_order:
+        h0, h1, h2, h3, h4, h5 = st.columns([0.4, 3, 1, 2, 1.5, 2])
+        h0.markdown("**№**")
+    else:
+        h1, h2, h3, h4, h5 = st.columns([3, 1, 2, 1.5, 2])
+    h1.markdown("**Наименование контроля**")
+    h2.markdown("**Включено**")
+    h3.markdown("**Дата начала (план)**")
+    h4.markdown("**Длительность (раб. дн)**")
+    h5.markdown("**Дата завершения (план)**")
+    st.markdown("<hr style='margin: 5px 0 15px 0;'>", unsafe_allow_html=True)
+
+
+# --- РЕНДЕР НЕЗАВИСИМОГО КОНТРОЛЯ ---
+def render_control_row_independent(name, default_start: date, with_order: bool = False):
     props = CONTROLS_DB[name]
     default_dur = props["dur"]
     kb = key_base_from_name(name)
@@ -166,31 +188,38 @@ def render_control_row(name):
     if f"{kb}_dur" not in st.session_state:
         st.session_state[f"{kb}_dur"] = default_dur
 
-    c1, c2, c3, c4, c5 = st.columns([3, 1, 2, 1.5, 2])
+    if with_order:
+        c0, c1, c2, c3, c4, c5 = st.columns([0.4, 3, 1, 2, 1.5, 2])
+        order_key = f"{kb}_order"
+        with c0:
+            st.number_input(
+                "№",
+                min_value=1,
+                value=st.session_state.get(order_key, 1),
+                key=order_key,
+                label_visibility="collapsed",
+            )
+    else:
+        c1, c2, c3, c4, c5 = st.columns([3, 1, 2, 1.5, 2])
 
     with c1:
         st.write(f"**{name}**")
-        if name == "Проверка информации в Блоке ИБ":
-            st.caption("Спец. условие: +5/8 дней от инфо-даты")
 
     with c2:
         is_checked = st.checkbox("ДА", key=f"{kb}_check", label_visibility="collapsed")
 
     if is_checked:
-        # Старт (для всех отображаем, но первый реально влияет на цепочку,
-        # остальные будут переписаны recalc_chain на следующем проходе)
         with c3:
-            start_val = st.session_state.get(f"{kb}_start", info_date)
-            st.date_input(
+            start_val = st.session_state.get(f"{kb}_start", default_start)
+            start_val = st.date_input(
                 "Start",
                 value=start_val,
                 key=f"{kb}_start",
                 label_visibility="collapsed",
             )
 
-        # Длительность
         with c4:
-            st.number_input(
+            dur_val = st.number_input(
                 "Dur",
                 min_value=1,
                 value=st.session_state.get(f"{kb}_dur", default_dur),
@@ -198,19 +227,17 @@ def render_control_row(name):
                 label_visibility="collapsed",
             )
 
-        # Дата окончания — в том же стиле, но только для отображения (цепочка управляет автоматом)
-        with c5:
-            end_val = st.session_state.get(
-                f"{kb}_end",
-                st.session_state.get(f"{kb}_start", info_date) + timedelta(days=default_dur - 1),
-            )
+        # рассчитываем дату окончания по рабочим дням
+        end_val = end_date_by_workdays(start_val, int(dur_val))
+        st.session_state[f"{kb}_end"] = end_val
 
+        with c5:
             st.date_input(
                 "End",
                 value=end_val,
                 key=f"{kb}_end",
                 label_visibility="collapsed",
-                disabled=True,  # пользователь не может вручную ломать цепочку
+                disabled=True,
             )
     else:
         with c3:
@@ -223,35 +250,192 @@ def render_control_row(name):
     st.markdown("<hr style='margin: 5px 0; border-top: 1px dashed #eee;'>", unsafe_allow_html=True)
 
 
-# Рендеринг строк
-st.markdown("##### Заполнение в ДЗО опросных листов")
-for name, props in CONTROLS_DB.items():
-    if props["cat"] == "Опросные листы":
-        render_control_row(name)
+# --- ВЫЧИСЛЕНИЕ БЛОКА "ПРОВЕРКА ИНФОРМАЦИИ В БЛОКЕ ИБ" + "ОТЧЕТ" ---
 
-st.markdown("##### Инструментальные проверки")
-for name, props in CONTROLS_DB.items():
-    if props["cat"] == "Инструментальные проверки":
-        render_control_row(name)
+def compute_info_and_report(dzo_controls_sorted, instrumental_core):
+    """
+    1. Суммируем длительности (в рабочих днях) всех включённых контролей ДЗО.
+    2. Суммируем длительности выбранных инструментальных проверок (ядро).
+    3. Длительность проверки в Блоке ИБ = max(∑ ДЗО, ∑ БИБ) + 5 раб. дн.
+    4. Старт проверки = дата окончания первого (по порядку) выбранного контроля ДЗО.
+       Если ни один контроль ДЗО не выбран — fallback к info_date.
+    5. Окончание проверки считаем по рабочим дням.
+    6. Отчет стартует в следующий рабочий день после окончания проверки и длится 1 рабочий день.
+    Всё сохраняем в session_state.
+    """
+    # 1. Суммарная длительность блоков ДЗО
+    total_dzo_dur = 0
+    for name, props in CONTROLS_DB.items():
+        if props["cat"] == "Опросные листы":
+            kb = key_base_from_name(name)
+            if st.session_state.get(f"{kb}_check", False):
+                dur = int(st.session_state.get(f"{kb}_dur", props["dur"]))
+                total_dzo_dur += dur
+
+    # 2. Суммарная длительность инструмента
+    total_instr_dur = 0
+    for name in instrumental_core:
+        props = CONTROLS_DB[name]
+        kb = key_base_from_name(name)
+        if st.session_state.get(f"{kb}_check", False):
+            dur = int(st.session_state.get(f"{kb}_dur", props["dur"]))
+            total_instr_dur += dur
+
+    # 3. Длительность проверки в БИБ
+    pib_name = "Проверка информации в Блоке ИБ"
+    pib_kb = key_base_from_name(pib_name)
+
+    pib_dur = max(total_dzo_dur, total_instr_dur) + 5
+
+    # 4. Старт проверки — от даты окончания первого по порядку выбранного ДЗО
+    first_dzo_end = None
+    for name in dzo_controls_sorted:
+        kb = key_base_from_name(name)
+        if st.session_state.get(f"{kb}_check", False):
+            first_dzo_end = st.session_state.get(f"{kb}_end")
+            break
+
+    if first_dzo_end is not None:
+        pib_start = next_workday(first_dzo_end)
+    else:
+        # если ДЗО не выбраны — fallback на дату начала контроля ИБ
+        pib_start = next_workday(info_date)
+
+    pib_end = end_date_by_workdays(pib_start, pib_dur)
+
+    st.session_state[f"{pib_kb}_check"] = True
+    st.session_state[f"{pib_kb}_dur"] = pib_dur
+    st.session_state[f"{pib_kb}_start"] = pib_start
+    st.session_state[f"{pib_kb}_end"] = pib_end
+
+    # 5–6. Подготовка и согласование отчета
+    report_name = "Подготовка и согласование Отчета"
+    report_kb = key_base_from_name(report_name)
+
+    report_dur = 1
+    report_start = next_workday(pib_end)
+    report_end = report_start
+
+    st.session_state[f"{report_kb}_check"] = True
+    st.session_state[f"{report_kb}_dur"] = report_dur
+    st.session_state[f"{report_kb}_start"] = report_start
+    st.session_state[f"{report_kb}_end"] = report_end
+
+    return total_dzo_dur, total_instr_dur, pib_dur
+
+
+# --- 3. ВЫБОР КОНТРОЛЕЙ / ПЛАНИРОВАНИЕ ЭТАПОВ ---
+
+st.markdown('<div class="header-box">Планирование этапов (Контроли)</div>', unsafe_allow_html=True)
+
+# --- Блок 3.1. Заполнение в ДЗО опросных листов ---
+st.markdown('<div class="header-box" style="font-size:16px;">Заполнение в ДЗО опросных листов</div>', unsafe_allow_html=True)
+st.markdown('<div class="form-row">', unsafe_allow_html=True)
+
+# список контролей ДЗО
+dzo_controls = [name for name, props in CONTROLS_DB.items() if props["cat"] == "Опросные листы"]
+
+# инициализируем порядок по умолчанию (как в словаре)
+for idx, name in enumerate(dzo_controls):
+    order_key = f"{key_base_from_name(name)}_order"
+    if order_key not in st.session_state:
+        st.session_state[order_key] = idx + 1
+
+# сортировка по текущему порядку
+dzo_controls_sorted = sorted(
+    dzo_controls,
+    key=lambda n: st.session_state.get(f"{key_base_from_name(n)}_order", 999),
+)
+
+render_table_header(with_order=True)
+for name in dzo_controls_sorted:
+    render_control_row_independent(name, default_start=info_date, with_order=True)
+st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# --- Блок 3.2. Инструментальные проверки ---
+st.markdown('<div class="header-box" style="font-size:16px;">Инструментальные проверки</div>', unsafe_allow_html=True)
+st.markdown('<div class="form-row">', unsafe_allow_html=True)
+render_table_header(with_order=False)
+instrumental_core = ['"Здоровье AD"', "Сканирование уязвимостей", "Внутренний пентест"]
+for name in instrumental_core:
+    render_control_row_independent(name, default_start=info_date, with_order=False)
+st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# --- Блок 3.3. Проверка информации в Блоке ИБ + Отчет ---
+total_dzo_dur, total_instr_dur, pib_dur = compute_info_and_report(dzo_controls_sorted, instrumental_core)
+
+st.markdown('<div class="header-box" style="font-size:16px;">Проверка информации в Блоке ИБ и подготовка отчета</div>', unsafe_allow_html=True)
+st.markdown('<div class="form-row">', unsafe_allow_html=True)
+render_table_header(with_order=False)
+
+# Рендер статичных строк для проверки и отчета
+for name in ["Проверка информации в Блоке ИБ", "Подготовка и согласование Отчета"]:
+    kb = key_base_from_name(name)
+    dur = st.session_state.get(f"{kb}_dur", CONTROLS_DB[name]["dur"])
+    start = st.session_state.get(f"{kb}_start", info_date)
+    end = st.session_state.get(f"{kb}_end", end_date_by_workdays(start, int(dur)))
+
+    c1, c2, c3, c4, c5 = st.columns([3, 1, 2, 1.5, 2])
+
+    with c1:
+        st.write(f"**{name}**")
+        if name == "Проверка информации в Блоке ИБ":
+            st.caption(
+                "• Старт от даты окончания первого выбранного контроля ДЗО "
+                "(если ДЗО не выбраны — от даты начала контроля ИБ)."
+            )
+            st.caption(
+                f"• Длительность = max(∑ ДЗО = {total_dzo_dur}; "
+                f"∑ БИБ = {total_instr_dur}) + 5 = {dur} раб. дн."
+            )
+        if name == "Подготовка и согласование Отчета":
+            st.caption("• Старт в следующий рабочий день после окончания проверки в БИБ, длительность 1 раб. дн.")
+
+    with c2:
+        st.write("ДА")
+        st.session_state[f"{kb}_check"] = True
+
+    with c3:
+        st.date_input(
+            "Start",
+            value=start,
+            key=f"{kb}_start",
+            label_visibility="collapsed",
+            disabled=True,
+        )
+
+    with c4:
+        st.number_input(
+            "Dur",
+            min_value=1,
+            value=int(dur),
+            key=f"{kb}_dur",
+            label_visibility="collapsed",
+            disabled=True,
+        )
+
+    with c5:
+        st.date_input(
+            "End",
+            value=end,
+            key=f"{kb}_end",
+            label_visibility="collapsed",
+            disabled=True,
+        )
+
+    st.markdown("<hr style='margin: 5px 0; border-top: 1px dashed #eee;'>", unsafe_allow_html=True)
 
 st.markdown("</div>", unsafe_allow_html=True)
 
 # --- 4. РАСЧЕТ И РЕЗУЛЬТАТ ---
-st.markdown("### Результаты планирования")
+st.markdown("### Результаты планирования (нажать дважды)")
 
 if st.button("Рассчитать план и График", type="primary"):
     final_schedule = []
-
-    # Курсор времени: начинаем с info_date
-    current_cursor = info_date
-
-    # Проверка наличия скана и пентеста для условия "Проверка информации"
-    scan_key = key_base_from_name("Сканирование уязвимостей")
-    pentest_key = key_base_from_name("Внутренний пентест")
-    has_scan = st.session_state.get(f"{scan_key}_check", False)
-    has_pentest = st.session_state.get(f"{pentest_key}_check", False)
-
-    first_enabled_seen = False
 
     for name in CONTROLS_ORDER:
         props = CONTROLS_DB[name]
@@ -260,21 +444,9 @@ if st.button("Рассчитать план и График", type="primary"):
         if not st.session_state.get(f"{kb}_check", False):
             continue
 
-        duration = st.session_state.get(f"{kb}_dur", props["dur"])
-
-        # старт
-        if not first_enabled_seen:
-            start_date = st.session_state.get(f"{kb}_start", current_cursor)
-            first_enabled_seen = True
-        else:
-            start_date = current_cursor
-
-        if name == "Проверка информации в Блоке ИБ":
-            lag_days = 8 if (has_scan and has_pentest) else 5
-            min_start_date = info_date + timedelta(days=lag_days)
-            start_date = max(start_date, min_start_date)
-
-        end_date_inclusive = start_date + timedelta(days=duration - 1)
+        start_date = st.session_state.get(f"{kb}_start")
+        end_date_inclusive = st.session_state.get(f"{kb}_end")
+        duration = int(st.session_state.get(f"{kb}_dur", props["dur"]))
 
         final_schedule.append(
             {
@@ -282,16 +454,18 @@ if st.button("Рассчитать план и График", type="primary"):
                 "Категория": props["cat"],
                 "Начало": start_date,
                 "Окончание": end_date_inclusive,
-                "Длительность (дн)": duration,
+                "Длительность (раб. дн)": duration,
             }
         )
-
-        current_cursor = end_date_inclusive + timedelta(days=1)
 
     if not final_schedule:
         st.warning("Не выбрано ни одного контроля.")
     else:
         df = pd.DataFrame(final_schedule)
+
+        # Запоминаем максимальную дату окончания для отображения в шапке
+        st.session_state["overall_end_date"] = df["Окончание"].max()
+
 
         # --- ОТОБРАЖЕНИЕ ТАБЛИЦЫ ---
         df_display = df.copy()
@@ -300,7 +474,7 @@ if st.button("Рассчитать план и График", type="primary"):
 
         st.subheader("Таблица этапов")
         st.dataframe(
-            df_display[["Задача", "Начало", "Окончание", "Длительность (дн)"]],
+            df_display[["Задача", "Начало", "Окончание", "Длительность (раб. дн)"]].sort_values(by="Начало"),
             use_container_width=True,
             hide_index=True,
         )
@@ -319,7 +493,7 @@ if st.button("Рассчитать план и График", type="primary"):
                 "border": 1,
                 "align": "left",
                 "valign": "top",
-                "text_wrap": True      # включён перенос строк
+                "text_wrap": True
             })
             cell_center = workbook.add_format({"border": 1, "align": "center", "valign": "vcenter"})
 
@@ -329,9 +503,7 @@ if st.button("Рассчитать план и График", type="primary"):
             worksheet.write("A2", "Название ДЗО", cell)
             worksheet.write("B2", dzo_name, cell)
             worksheet.write("A3", "Дата начала контроля ИБ", cell)
-            worksheet.write("B3", begin_date.strftime("%d.%m.%Y"), cell)
-            worksheet.write("A4", "Дата последнего предоставления информации", cell)
-            worksheet.write("B4", info_date.strftime("%d.%m.%Y"), cell)
+            worksheet.write("B3", info_date.strftime("%d.%m.%Y"), cell)
 
             worksheet.write("A5", "Цели и задачи контроля ИБ", cell)
             worksheet.write("B5", goals, cell_wrap)
@@ -356,7 +528,7 @@ if st.button("Рассчитать план и График", type="primary"):
 
             row = start_row + 2
 
-            # Опросные листы
+            # Опросные листы (в Excel — в базовом порядке)
             for name, props in CONTROLS_DB.items():
                 if props["cat"] == "Опросные листы":
                     kb = key_base_from_name(name)
@@ -373,7 +545,7 @@ if st.button("Рассчитать план и График", type="primary"):
                     worksheet.write(row, 3, end.strftime("%d.%m.%Y") if enabled == "ДА" else "", cell_center)
                     row += 1
 
-            # Инструментальные проверки
+            # Инструментальные проверки (ядро)
             row += 1
             worksheet.merge_range(row, 0, row, 3, "Инструментальные проверки", bold)
             row += 1
@@ -383,21 +555,44 @@ if st.button("Рассчитать план и График", type="primary"):
 
             row += 1
 
-            for name, props in CONTROLS_DB.items():
-                if props["cat"] == "Инструментальные проверки":
-                    kb = key_base_from_name(name)
-                    enabled = "ДА" if st.session_state.get(f"{kb}_check", False) else "НЕТ"
-                    if enabled == "ДА":
-                        start = st.session_state.get(f"{kb}_start")
-                        end = st.session_state.get(f"{kb}_end")
-                    else:
-                        start = end = ""
+            for name in instrumental_core:
+                props = CONTROLS_DB[name]
+                kb = key_base_from_name(name)
+                enabled = "ДА" if st.session_state.get(f"{kb}_check", False) else "НЕТ"
+                if enabled == "ДА":
+                    start = st.session_state.get(f"{kb}_start")
+                    end = st.session_state.get(f"{kb}_end")
+                else:
+                    start = end = ""
 
-                    worksheet.write(row, 0, name, cell)
-                    worksheet.write(row, 1, enabled, cell_center)
-                    worksheet.write(row, 2, start.strftime("%d.%m.%Y") if enabled == "ДА" else "", cell_center)
-                    worksheet.write(row, 3, end.strftime("%d.%m.%Y") if enabled == "ДА" else "", cell_center)
-                    row += 1
+                worksheet.write(row, 0, name, cell)
+                worksheet.write(row, 1, enabled, cell_center)
+                worksheet.write(row, 2, start.strftime("%d.%m.%Y") if enabled == "ДА" else "", cell_center)
+                worksheet.write(row, 3, end.strftime("%d.%m.%Y") if enabled == "ДА" else "", cell_center)
+                row += 1
+
+            # Проверка информации и отчёт
+            row += 1
+            worksheet.merge_range(row, 0, row, 3, "Проверка информации в Блоке ИБ и подготовка отчета", bold)
+            row += 1
+
+            for col, h in enumerate(headers):
+                worksheet.write(row, col, h, bold)
+
+            row += 1
+
+            for name in ["Проверка информации в Блоке ИБ", "Подготовка и согласование Отчета"]:
+                props = CONTROLS_DB[name]
+                kb = key_base_from_name(name)
+                enabled = "ДА"  # эти блоки всегда присутствуют
+                start = st.session_state.get(f"{kb}_start")
+                end = st.session_state.get(f"{kb}_end")
+
+                worksheet.write(row, 0, name, cell)
+                worksheet.write(row, 1, enabled, cell_center)
+                worksheet.write(row, 2, start.strftime("%d.%m.%Y"), cell_center)
+                worksheet.write(row, 3, end.strftime("%d.%m.%Y"), cell_center)
+                row += 1
 
             worksheet.set_column("A:A", 40)
             worksheet.set_column("B:D", 18)
@@ -411,20 +606,25 @@ if st.button("Рассчитать план и График", type="primary"):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-
         # --- ДИАГРАММА ГАНТА ---
         st.subheader("Диаграмма Ганта")
 
         df_gantt = df.copy()
+        # Plotly ожидает конец интервала как правую границу, поэтому +1 день
         df_gantt["Окончание_Plotly"] = df_gantt["Окончание"] + timedelta(days=1)
 
         fig = px.timeline(
-            df_gantt,
+            df_gantt.sort_values(by="Начало"),
             x_start="Начало",
             x_end="Окончание_Plotly",
             y="Задача",
             color="Категория",
-            text="Длительность (дн)",
+            text="Длительность (раб. дн)",
+            color_discrete_map={
+                "Опросные листы": "#7700ff",
+                "Инструментальные проверки": "#fe4f13",
+                "Информация и отчет": "#0f1828",
+            },
         )
 
         fig.update_yaxes(autorange="reversed")
