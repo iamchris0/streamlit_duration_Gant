@@ -3,6 +3,10 @@ import pandas as pd
 from datetime import date, timedelta
 import plotly.express as px
 from io import BytesIO
+import warnings 
+
+
+warnings.filterwarnings('ignore')
 
 # --- НАСТРОЙКА СТРАНИЦЫ ---
 st.set_page_config(page_title="План проведения контроля ИБ", layout="wide")
@@ -118,8 +122,9 @@ CONTROLS_DB = {
     "Комплаенс ГИС": {"cat": "Опросные листы", "dur": 2},
     "КТ, Лицензирование": {"cat": "Опросные листы", "dur": 2},
     "Безопасная разработка ПО": {"cat": "Опросные листы", "dur": 5},
+    "Защищенность среды виртуализации": {"cat": "Опросные листы", "dur": 5},
     '"Здоровье AD"': {"cat": "Инструментальные проверки", "dur": 5},
-    "Сканирование уязвимостей": {"cat": "Инструментальные проверки", "dur": 20},
+    "Сканирование уязвимостей внутренней сети": {"cat": "Инструментальные проверки", "dur": 20},
     "Внутренний пентест": {"cat": "Инструментальные проверки", "dur": 20},
     "Проверка информации в Блоке ИБ": {"cat": "Информация и отчет", "dur": 5},  # будет пересчитана
     "Подготовка и согласование Отчета": {"cat": "Информация и отчет", "dur": 1},
@@ -348,17 +353,36 @@ dzo_controls_sorted = sorted(
 )
 
 render_table_header(with_order=True)
+
+prev_end = None  # окончание предыдущего выбранного контроля
+
 for name in dzo_controls_sorted:
-    render_control_row_independent(name, default_start=info_date, with_order=True)
+    kb = key_base_from_name(name)
+
+    if prev_end is None:
+        # первый контроль ДЗО — от даты начала контроля ИБ
+        default_start = info_date
+    else:
+        # последующие — со следующего рабочего дня после окончания предыдущего
+        default_start = next_workday(prev_end)
+
+    # внутри функция:
+    #   - возьмёт default_start только если нет st.session_state[f"{kb}_start"]
+    #   - посчитает end по рабочим дням и запишет в session_state[f"{kb}_end"]
+    render_control_row_independent(name, default_start=default_start, with_order=True)
+
+    # после рендера обновляем prev_end, если контроль включён
+    if st.session_state.get(f"{kb}_check", False):
+        prev_end = st.session_state.get(f"{kb}_end", prev_end)
+
 st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown("<br>", unsafe_allow_html=True)
 
 # --- Блок 3.2. Инструментальные проверки ---
 st.markdown('<div class="header-box" style="font-size:16px;">Инструментальные проверки</div>', unsafe_allow_html=True)
 st.markdown('<div class="form-row">', unsafe_allow_html=True)
 render_table_header(with_order=False)
-instrumental_core = ['"Здоровье AD"', "Сканирование уязвимостей", "Внутренний пентест"]
+instrumental_core = ['"Здоровье AD"', "Сканирование уязвимостей внутренней сети", "Внутренний пентест"]
 for name in instrumental_core:
     render_control_row_independent(name, default_start=info_date, with_order=False)
 st.markdown("</div>", unsafe_allow_html=True)
@@ -435,6 +459,10 @@ st.markdown("</div>", unsafe_allow_html=True)
 st.markdown("### Результаты планирования (нажать дважды)")
 
 if st.button("Рассчитать план и График", type="primary"):
+    # считаем и сохраняем всё в session_state
+    st.session_state["plan_ready"] = True
+    
+if st.session_state.get("plan_ready"):    
     final_schedule = []
 
     for name in CONTROLS_ORDER:
@@ -606,34 +634,34 @@ if st.button("Рассчитать план и График", type="primary"):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        # --- ДИАГРАММА ГАНТА ---
-        st.subheader("Диаграмма Ганта")
+    # --- ДИАГРАММА ГАНТА ---
+    st.subheader("Диаграмма Ганта")
 
-        df_gantt = df.copy()
-        # Plotly ожидает конец интервала как правую границу, поэтому +1 день
-        df_gantt["Окончание_Plotly"] = df_gantt["Окончание"] + timedelta(days=1)
+    df_gantt = df.copy()
+    # Plotly ожидает конец интервала как правую границу, поэтому +1 день
+    df_gantt["Окончание_Plotly"] = df_gantt["Окончание"] + timedelta(days=1)
 
-        fig = px.timeline(
-            df_gantt.sort_values(by="Начало"),
-            x_start="Начало",
-            x_end="Окончание_Plotly",
-            y="Задача",
-            color="Категория",
-            text="Длительность (раб. дн)",
-            color_discrete_map={
-                "Опросные листы": "#7700ff",
-                "Инструментальные проверки": "#fe4f13",
-                "Информация и отчет": "#0f1828",
-            },
-        )
+    fig = px.timeline(
+        df_gantt.sort_values(by="Начало"),
+        x_start="Начало",
+        x_end="Окончание_Plotly",
+        y="Задача",
+        color="Категория",
+        text="Длительность (раб. дн)",
+        color_discrete_map={
+            "Опросные листы": "#7700ff",
+            "Инструментальные проверки": "#fe4f13",
+            "Информация и отчет": "#0f1828",
+        },
+    )
 
-        fig.update_yaxes(autorange="reversed")
-        fig.update_layout(
-            xaxis_title="Дата",
-            yaxis_title=None,
-            height=600,
-            bargap=0.2,
-        )
-        fig.update_traces(textposition="inside", insidetextanchor="middle")
+    fig.update_yaxes(autorange="reversed")
+    fig.update_layout(
+        xaxis_title="Дата",
+        yaxis_title=None,
+        height=600,
+        bargap=0.2,
+    )
+    fig.update_traces(textposition="inside", insidetextanchor="middle")
 
-        st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
